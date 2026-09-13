@@ -16,4 +16,4 @@ Python · Pydantic · Instructor · local classifier models · pytest
 
 **status** 
 
-Design phase - PRD, HLD and LLD completed
+Design phase - [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed
