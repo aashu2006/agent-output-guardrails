@@ -1,0 +1,9 @@
+[project]
+name = "agent-output-guardrails"
+version = "0.1.0"
+description = "A guardrail layer between an LLM and the app"
+requires-python = ">=3.10"
+dependencies = ["pydantic>=2.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
