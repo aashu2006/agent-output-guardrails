@@ -12,8 +12,8 @@ A safety and reliability layer that sits between an LLM and the application, val
 
 **tech stack** 
 
-Python · Pydantic · Instructor · local classifier models · pytest
+Python · Pydantic · local classifier models · pytest
 
 **status** 
 
-Design phase - [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed
+Phase 1 in progress - schema validator working, [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed
