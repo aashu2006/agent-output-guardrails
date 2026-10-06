@@ -9,7 +9,7 @@ class AggregatedResults(BaseModel):
         for r in self.results:
             if r.guardrail == name:
                 return r
-            return None
+        return None
 
     @property
     def transformed_output(self) -> str | None:
