@@ -78,7 +78,7 @@ class SchemaValidator(Guardrail):
     def __init__(self, schema: type[BaseModel]): ...
     def check(self, candidate, context=None) -> GuardrailResult: ...
 ```
-
+- Pre-process: strip markdown code fences (```json ... ```) before parsing. LLMs wrap JSON in fences constantly, and every fence-caused failure would cost a full re-ask round trip. This is pragmatic pre-processing, not validation weakening.
 - Try `json.loads`, then `schema.model_validate`. Any failure: `passed=False`, `reason` = flattened Pydantic error list ("field X: must be integer"), full errors in `metadata["errors"]`.
 - On success, `metadata["parsed"]` holds the validated dict so downstream doesn't parse twice.
 - Deterministic, no models, no config beyond the schema class.
