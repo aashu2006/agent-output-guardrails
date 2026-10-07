@@ -48,3 +48,7 @@ def test_original_never_modified_without_proposal():
     d = _decide(_r("schema"), _r("pii", transformed=None))
     assert d.action == Action.ALLOW
     assert d.output == "original"
+
+def test_schema_fail_blocks_even_when_not_first():
+    d = _decide(_r("pii"), _r("schema", passed=False, reason="bad json"))
+    assert d.action == Action.BLOCK
