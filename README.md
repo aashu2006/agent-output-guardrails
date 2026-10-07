@@ -16,4 +16,4 @@ Python · Pydantic · local classifier models · pytest
 
 **status** 
 
-Phase 1 complete - schema validation, PII redaction and policy engine working (15 tests passing), [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed
+Phase 1 complete - schema validation, PII redaction and policy engine working (21 tests passing + 6 tracked red-team gaps), [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed
