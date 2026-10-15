@@ -14,6 +14,7 @@ class Decision(BaseModel):
     action: Action
     reason: str
     output: str | None = None
+    timings: dict[str, float] = {}
 
 
 class PolicyEngine:

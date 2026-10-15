@@ -10,7 +10,7 @@ class SchemaValidator(Guardrail):
     def __init__(self, schema: type[BaseModel]):
         self.schema = schema
 
-    def check(self, candidate: str, context: dict | None = None) -> GuardrailResult:
+    def _check(self, candidate: str, context: dict | None = None) -> GuardrailResult:
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError as e:
