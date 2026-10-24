@@ -77,7 +77,7 @@ def _walk_and_redact(obj, counts):
 class PIIScanner(Guardrail):
     name = "pii"
 
-    def check(self, candidate: str, context: dict | None = None) -> GuardrailResult:
+    def _check(self, candidate: str, context: dict | None = None) -> GuardrailResult:
         parsed = (context or {}).get("parsed")
         counts: dict[str, int] = {}
 
