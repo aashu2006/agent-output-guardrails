@@ -16,4 +16,4 @@ Python · Pydantic · local classifier models · pytest
 
 **status** 
 
-Phase 1 complete - schema validation, PII redaction and policy engine working (21 tests passing + 6 tracked red-team gaps), [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed
+Phase 1 complete and released as [v0.1.0](https://github.com/aashu2006/agent-output-guardrails/releases/tag/v0.1.0). Schema validation, PII redaction, policy engine and engine coordinator working (27 tests passing + 6 tracked red-team gaps). [PRD](https://docs.google.com/document/d/1Facjpln9snlBweCfPZkGhbQkcLV4DzSwRFU6imOF0y8/edit?tab=t.0), HLD and LLD completed.
