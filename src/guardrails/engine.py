@@ -6,18 +6,28 @@ from pydantic import BaseModel
 from guardrails.aggregator import AggregatedResults
 from guardrails.checks.pii import PIIScanner
 from guardrails.checks.schema import SchemaValidator
+from guardrails.checks.toxicity import ToxicityScanner
 from guardrails.config import PolicyConfig
 from guardrails.policy import Decision, PolicyEngine
+
 
 
 class GuardrailEngine:
     """Coordinator: runs the pipeline. Phase 1 scope: validate() only.
     run() (provider call + re-ask loop) comes with Phase 2."""
 
-    def __init__(self, schema: type[BaseModel], config: PolicyConfig | None = None):
+    def __init__(
+        self,
+        schema: type[BaseModel],
+        config: PolicyConfig | None = None,
+        toxicity_scanner: ToxicityScanner | None = None,
+    ):
         self.config = config or PolicyConfig()
         self.schema_check = SchemaValidator(schema)
         self.pii_check = PIIScanner()
+        self.toxicity_check = toxicity_scanner or ToxicityScanner(
+            threshold=self.config.toxicity_threshold
+        )
         self.policy = PolicyEngine()
 
     def validate(self, candidate: str) -> Decision:
@@ -31,19 +41,24 @@ class GuardrailEngine:
         results = [schema_result]
 
         # stage 2: remaining checks in parallel on the same immutable candidate
-        if schema_result.passed and "pii" in self.config.enabled:
-            parallel_checks = [
-                (self.pii_check, {"parsed": schema_result.metadata.get("parsed")}),
-                # Phase 2: groundedness + toxicity append here, zero engine changes
-            ]
-            t = time.perf_counter()
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                futures = [
-                    pool.submit(check.check, candidate, ctx)
-                    for check, ctx in parallel_checks
-                ]
-                results.extend(f.result() for f in futures)
-            timings["parallel"] = time.perf_counter() - t
+        if schema_result.passed:
+            parallel_checks = []
+            if "pii" in self.config.enabled:
+                parallel_checks.append(
+                    (self.pii_check, {"parsed": schema_result.metadata.get("parsed")})
+                )
+            if "toxicity" in self.config.enabled:
+                parallel_checks.append((self.toxicity_check, {}))
+
+            if parallel_checks:
+                t = time.perf_counter()
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    futures = [
+                        pool.submit(check.check, candidate, ctx)
+                        for check, ctx in parallel_checks
+                    ]
+                    results.extend(f.result() for f in futures)
+                timings["parallel"] = time.perf_counter() - t
 
         # stage 3: aggregate + decide
         decision = self.policy.decide(AggregatedResults(results=results), candidate)
