@@ -170,7 +170,18 @@ engine_v2 = GuardrailEngine(
     config=PolicyConfig(enabled=["schema", "pii", "toxicity"]),
 )
 
-d4 = engine_v2.validate(toxic_input)
-print_card("3.1", "ABUSIVE/TOXIC AGENT RESPONSE", toxic_input, d4)
+try:
+    engine_v2.toxicity_check._get_classifier()  # load the real model up front
+    model_loaded = True
+except ImportError:
+    print(f"{YELLOW}toxicity model not installed, run: pip install -e '.[ml]'{RESET}\n")
+    model_loaded = False
+except Exception as e:
+    print(f"{YELLOW}toxicity model failed to load ({type(e).__name__}), skipping section 3{RESET}\n")
+    model_loaded = False
 
-print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")
+if model_loaded:
+    d4 = engine_v2.validate(toxic_input)
+    print_card("3.1", "ABUSIVE/TOXIC AGENT RESPONSE", toxic_input, d4)
+
+    print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")

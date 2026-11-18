@@ -71,6 +71,8 @@ class ToxicityScanner(Guardrail):
                     "text-classification",
                     model=self.model_name,
                     top_k=None,
+                    truncation=True,
+                    max_length=512,
                 )
             except ImportError as e:
                 raise ImportError(

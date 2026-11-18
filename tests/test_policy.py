@@ -66,17 +66,3 @@ def test_toxicity_beats_pii_modify():
     d = _decide(_r("schema"), _r("pii", transformed="clean"), _r("toxicity", passed=False, reason="score 0.95"))
     assert d.action == Action.BLOCK
     assert d.output is None
-
-
-def test_toxicity_fail_blocks_with_incident_id():
-    d = _decide(_r("schema"), _r("pii"), _r("toxicity", passed=False, reason="score 0.95"))
-    assert d.action == Action.BLOCK
-    assert "toxic content detected" in d.reason
-    assert "incident_id=" in d.reason
-
-
-def test_toxicity_beats_pii_modify():
-    # Even if PII produced a transformed output, toxicity BLOCK takes precedence
-    d = _decide(_r("schema"), _r("pii", transformed="clean"), _r("toxicity", passed=False, reason="score 0.95"))
-    assert d.action == Action.BLOCK
-    assert d.output is None
