@@ -1,3 +1,5 @@
+import json
+
 from pydantic import BaseModel
 from guardrails.checks.schema import SchemaValidator
 
@@ -45,3 +47,25 @@ def test_crash_safety_returns_error_result():
 def test_error_never_with_passed():
     r = v.check(None)
     assert not (r.passed and r.error)
+
+
+def test_rejected_input_value_not_in_metadata():
+    # wrong-type value carrying a phone number must not leak into metadata
+    r = v.check('{"customer": "Acme", "amount": "call 9876543210", "paid": true}')
+    assert r.passed is False
+    assert "9876543210" not in str(r.metadata)
+
+
+def test_validation_failure_metadata_is_json_serializable():
+    r = v.check('{"customer": "Acme", "amount": "lots", "paid": "maybe"}')
+    assert r.passed is False
+    json.dumps(r.metadata)  # must not raise
+
+
+def test_error_entries_have_only_loc_msg_type():
+    r = v.check('{"customer": 123, "amount": "lots"}')
+    assert r.passed is False
+    assert len(r.metadata["errors"]) == 3
+    for err in r.metadata["errors"]:
+        assert set(err) == {"loc", "msg", "type"}
+        assert all(isinstance(part, str) for part in err["loc"])
