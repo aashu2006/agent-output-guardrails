@@ -1,5 +1,66 @@
 from pydantic import BaseModel
 from guardrails.checks.schema import SchemaValidator
+from guardrails.checks.pii import PIIScanner
+from guardrails.engine import GuardrailEngine
+from guardrails.config import PolicyConfig
+from guardrails.policy import Action
+
+# ---------------------------------------------------------------------------
+# Beautiful Terminal UI Styling & Helper Functions
+# ---------------------------------------------------------------------------
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def print_section_header(title: str, subtitle: str):
+    width = 62
+    print(f"\n{CYAN}┌{'─' * width}┐")
+    print(f"│ {title:<{width - 1}}│")
+    print(f"│ {subtitle:<{width - 1}}│")
+    print(f"└{'─' * width}┘{RESET}\n")
+
+
+def print_card(case_num: str, title: str, input_str: str, d):
+    disp_input = input_str[:76] + "..." if len(input_str) > 79 else input_str
+
+    if d.action == Action.MODIFY:
+        disp_action = f"{YELLOW}✎ MODIFY (Redacted){RESET}"
+    elif d.action == Action.ALLOW:
+        disp_action = f"{GREEN}✔ ALLOW{RESET}"
+    elif d.action == Action.BLOCK:
+        disp_action = f"{RED}✖ BLOCK{RESET}"
+    else:
+        disp_action = str(d.action.value.upper())
+
+    if d.output is None:
+        disp_output = f"{RED}(Suppressed / None - Unsafe to ship){RESET}"
+    else:
+        out_text = d.output[:76] + "..." if len(d.output) > 79 else d.output
+        disp_output = f"{GREEN}{out_text}{RESET}"
+
+    t = d.timings
+    schema_ms = t.get("schema", 0.0) * 1000
+    total_ms = t.get("total", 0.0) * 1000
+    if "parallel" in t:
+        parallel_ms = t.get("parallel", 0.0) * 1000
+        disp_latency = (
+            f"schema: {schema_ms:.1f}ms | parallel: {parallel_ms:.1f}ms | "
+            f"total: {total_ms:.1f}ms (Total: {total_ms:.2f}ms)"
+        )
+    else:
+        disp_latency = f"schema: {schema_ms:.1f}ms | total: {total_ms:.1f}ms (Total: {total_ms:.2f}ms)"
+
+    print(f"┌── [{case_num}] {title}")
+    print(f"│   Input    : {disp_input}")
+    print(f"│   Decision : {disp_action}")
+    print(f"│   Reason   : {d.reason}")
+    print(f"│   Output   : {disp_output}")
+    print(f"│   Latency  : {disp_latency}")
+    print(f"└──\n")
 
 
 class Invoice(BaseModel):
@@ -8,50 +69,108 @@ class Invoice(BaseModel):
     paid: bool
 
 
+# ===========================================================================
+# 1. INDIVIDUAL GUARDRAILS (Unit Level Checks)
+# ===========================================================================
+print_section_header(
+    "1. INDIVIDUAL GUARDRAILS (Unit Level Checks)",
+    "SchemaValidator & PIIScanner in Isolation",
+)
+
 validator = SchemaValidator(Invoice)
 
 good = '{"customer": "Acme Corp", "amount": 4999, "paid": false}'
 bad_json = '{"customer": "Acme Corp", "amount": 4999, paid: false'
 wrong_type = '{"customer": "Acme Corp", "amount": "a lot", "paid": false}'
 
-for label, response in [("valid", good), ("broken JSON", bad_json), ("wrong type", wrong_type)]:
-    r = validator.check(response)
-    print(f"\n--- {label} ---")
-    print("passed:", r.passed)
-    print("reason:", r.reason)
+# [1.A] Valid Schema
+r1 = validator.check(good)
+print(f"┌── [1.A] VALID SCHEMA PAYLOAD")
+print(f"│   Input    : {good}")
+print(f"│   Status   : {GREEN}✔ PASSED{RESET}")
+print(f"│   Reason   : None (Syntax & Types Valid)")
+print(f"└──\n")
 
-# --- PII demo ---
-from guardrails.checks.pii import PIIScanner
+# [1.B] Broken JSON Syntax
+r2 = validator.check(bad_json)
+print(f"┌── [1.B] BROKEN JSON SYNTAX")
+print(f"│   Input    : {bad_json}")
+print(f"│   Status   : {RED}✖ FAILED{RESET}")
+print(f"│   Reason   : {r2.reason}")
+print(f"└──\n")
 
+# [1.C] Wrong Data Type
+r3 = validator.check(wrong_type)
+print(f"┌── [1.C] WRONG DATA TYPE (Type Mismatch)")
+print(f"│   Input    : {wrong_type}")
+print(f"│   Status   : {RED}✖ FAILED{RESET}")
+print(f"│   Reason   : {r3.reason}")
+print(f"└──\n")
+
+# --- PII Unit Checks ---
 pii = PIIScanner()
 
 leaky = '{"customer": "Reach me at john@gmail.com or +91 9876543210", "amount": 500, "paid": true}'
-
 r_schema = validator.check(leaky)
 r_pii = pii.check(leaky, context={"parsed": r_schema.metadata.get("parsed")})
 
-print("\n--- PII in a valid response ---")
-print("schema passed:", r_schema.passed)
-print("pii passed:", r_pii.passed)
-print("found:", r_pii.metadata["found"])
-print("transformed:", r_pii.transformed_output)
+disp_leaky_out = r_pii.transformed_output[:76] + "..." if len(r_pii.transformed_output) > 79 else r_pii.transformed_output
+print(f"┌── [1.D] PII LEAK IN VALID RESPONSE")
+print(f"│   Input    : {leaky[:76]}...")
+print(f"│   Found    : {r_pii.metadata['found']}")
+print(f"│   Status   : {YELLOW}✎ REDACTED{RESET}")
+print(f"│   Output   : {GREEN}{disp_leaky_out}{RESET}")
+print(f"└──\n")
 
 clean = '{"customer": "Acme Corp", "amount": 500, "paid": true}'
 r_clean = pii.check(clean, context={"parsed": validator.check(clean).metadata.get("parsed")})
+print(f"┌── [1.E] CLEAN RESPONSE (No PII)")
+print(f"│   Input    : {clean}")
+print(f"│   Found    : {r_clean.metadata['found']} (Clean)")
+print(f"│   Status   : {GREEN}✔ UNTOUCHED{RESET}")
+print(f"│   Output   : {GREEN}{clean}{RESET}")
+print(f"└──\n")
 
-print("\n--- clean response, no PII ---")
-print("found:", r_clean.metadata["found"])
-print("transformed:", r_clean.transformed_output)
 
-# --- Phase 1 pipeline via GuardrailEngine ---
-from guardrails.engine import GuardrailEngine
+# ===========================================================================
+# 2. END-TO-END PIPELINE (GuardrailEngine)
+# ===========================================================================
+print_section_header(
+    "2. END-TO-END PIPELINE (GuardrailEngine)",
+    "Schema Gate -> Parallel Scanners -> Policy Decision",
+)
 
 engine = GuardrailEngine(Invoice)
 
-print("\n\n========== PHASE 1 PIPELINE (engine) ==========")
-for label, response in [("leaky", leaky), ("clean", clean), ("broken", bad_json)]:
-    d = engine.validate(response)
-    print(f"\n--- {label} -> {d.action.value.upper()} ---")
-    print("reason:", d.reason)
-    print("output:", d.output)
-    print("timings:", {k: f"{v*1000:.1f}ms" for k, v in d.timings.items()})
+# [2.1] Leaky Customer Data
+d1 = engine.validate(leaky)
+print_card("2.1", "LEAKY CUSTOMER DATA", leaky, d1)
+
+# [2.2] Clean Normal Invoice
+d2 = engine.validate(good)
+print_card("2.2", "CLEAN NORMAL INVOICE", good, d2)
+
+# [2.3] Corrupted Malformed JSON
+d3 = engine.validate(bad_json)
+print_card("2.3", "CORRUPTED MALFORMED JSON", bad_json, d3)
+
+
+# ===========================================================================
+# 3. PHASE 2: REAL ML TOXICITY GATE
+# ===========================================================================
+print_section_header(
+    "3. PHASE 2: REAL ML TOXICITY GATE",
+    "Live HuggingFace DistilBERT Neural Network Inference",
+)
+
+toxic_input = '{"customer": "You stupid idiot pay me right now!", "amount": 500, "paid": true}'
+
+engine_v2 = GuardrailEngine(
+    Invoice,
+    config=PolicyConfig(enabled=["schema", "pii", "toxicity"]),
+)
+
+d4 = engine_v2.validate(toxic_input)
+print_card("3.1", "ABUSIVE/TOXIC AGENT RESPONSE", toxic_input, d4)
+
+print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")

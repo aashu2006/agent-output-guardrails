@@ -1,3 +1,4 @@
+import uuid
 from enum import Enum
 from pydantic import BaseModel
 from guardrails.aggregator import AggregatedResults
@@ -27,7 +28,17 @@ class PolicyEngine:
                 return Decision(action=Action.BLOCK,
                                 reason=f"internal error in {r.guardrail}")
 
-        # 2. schema fail -> Phase 1 mein fail closed (re-ask Phase 2)
+        # 2. toxicity fail -> BLOCK immediately with incident ID (precedence over everything)
+        #Toxicity BLOCK > PII MODIFY > ALLOW
+        toxicity = agg.get("toxicity")
+        if toxicity and not toxicity.passed:
+            incident_id = uuid.uuid4().hex[:8]
+            return Decision(
+                action=Action.BLOCK,
+                reason=f"toxic content detected: incident_id={incident_id}",  #unique generate hoga agar toxicity check fail hua toh that is called incident_id
+            )
+
+        # 3. schema fail -> Phase 1 mein fail closed (re-ask Phase 2)
         schema = agg.get("schema")
         if schema and not schema.passed:
             return Decision(action=Action.BLOCK,
