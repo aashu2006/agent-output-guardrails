@@ -21,11 +21,23 @@ class SchemaValidator(Guardrail):
         try:
             validated = self.schema.model_validate(data)
         except ValidationError as e:
-            errors = [f"{'.'.join(str(l) for l in err['loc'])}: {err['msg']}" for err in e.errors()]
+            # only loc/msg/type: e.errors() also carries the raw rejected "input"
+            # (PII leak) and "ctx" (may hold non-JSON-serializable objects)
+            safe_errors = [
+                {
+                    "loc": [str(l) for l in err["loc"]],
+                    "msg": err["msg"],
+                    "type": err["type"],
+                }
+                for err in e.errors()
+            ]
+            reasons = [
+                f"{'.'.join(err['loc']) or 'root'}: {err['msg']}" for err in safe_errors
+            ]
             return GuardrailResult(
                 guardrail=self.name, passed=False,
-                reason="; ".join(errors),
-                metadata={"errors": e.errors()},
+                reason="; ".join(reasons),
+                metadata={"errors": safe_errors},
             )
         return GuardrailResult(
             guardrail=self.name, passed=True,
