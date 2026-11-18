@@ -160,10 +160,11 @@ print_card("2.3", "CORRUPTED MALFORMED JSON", bad_json, d3)
 # ===========================================================================
 print_section_header(
     "3. PHASE 2: REAL ML TOXICITY GATE",
-    "Live HuggingFace DistilBERT Neural Network Inference",
+    "Live HuggingFace unitary/toxic-bert Inference",
 )
 
 toxic_input = '{"customer": "You stupid idiot pay me right now!", "amount": 500, "paid": true}'
+polite_input = '{"customer": "Thanks, have a great day!", "amount": 500, "paid": true}'
 
 engine_v2 = GuardrailEngine(
     Invoice,
@@ -182,6 +183,9 @@ except Exception as e:
 
 if model_loaded:
     d4 = engine_v2.validate(toxic_input)
-    print_card("3.1", "ABUSIVE/TOXIC AGENT RESPONSE", toxic_input, d4)
+    print_card("3.1", "ABUSIVE/TOXIC AGENT RESPONSE (expect BLOCK)", toxic_input, d4)
+
+    d5 = engine_v2.validate(polite_input)
+    print_card("3.2", "POLITE AGENT RESPONSE (expect ALLOW)", polite_input, d5)
 
     print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")

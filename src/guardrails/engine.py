@@ -48,7 +48,9 @@ class GuardrailEngine:
                     (self.pii_check, {"parsed": schema_result.metadata.get("parsed")})
                 )
             if "toxicity" in self.config.enabled:
-                parallel_checks.append((self.toxicity_check, {}))
+                parallel_checks.append(
+                    (self.toxicity_check, {"parsed": schema_result.metadata.get("parsed")})
+                )
 
             if parallel_checks:
                 t = time.perf_counter()
