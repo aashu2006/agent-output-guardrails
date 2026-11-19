@@ -18,3 +18,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "slow: real-model tests, skipped unless run with --run-slow",
+]
