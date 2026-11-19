@@ -109,24 +109,67 @@ def test_non_toxic_label_never_matches_toxic():
 def test_parsed_context_scores_string_values_only():
     seen = []
 
-    def recording_classifier(text):
-        seen.append(text)
-        return [{"label": "toxic", "score": 0.01}]
+    def recording_classifier(texts):
+        seen.append(texts)
+        return [[{"label": "toxic", "score": 0.01}] for _ in texts]
 
     scanner = ToxicityScanner(classifier=recording_classifier)
     raw = '{"customer": "hello there", "amount": 5, "notes": ["a", {"inner": "b"}], "paid": true}'
     parsed = {"customer": "hello there", "amount": 5, "notes": ["a", {"inner": "b"}], "paid": True}
     scanner.check(raw, context={"parsed": parsed})
 
-    assert len(seen) == 1
-    text = seen[0]
-    assert "hello there" in text and "a" in text and "b" in text
-    for junk in ("{", "}", "[", '"', "customer", "amount", "notes", "inner", "paid", "5"):
-        assert junk not in text
+    # one batch call, each string value scored separately, no keys/brackets/numbers
+    assert seen == [["hello there", "a", "b"]]
 
 
 def test_no_parsed_context_falls_back_to_raw_candidate():
     seen = []
-    scanner = ToxicityScanner(classifier=lambda text: seen.append(text) or 0.0)
+    scanner = ToxicityScanner(classifier=lambda texts: seen.append(texts) or 0.0)
     scanner.check("plain text response", context={})
-    assert seen == ["plain text response"]
+    assert seen == [["plain text response"]]
+
+
+# --- truncation bypass / max over strings, chunks and labels -----------------
+
+def _keyword_classifier(keyword: str = "idiot"):
+    """Fake batch classifier: toxic-bert shape per text, toxic only if keyword present."""
+    def classify(texts):
+        return [
+            [{"label": "toxic", "score": 0.97 if keyword in t else 0.01},
+             {"label": "insult", "score": 0.01}]
+            for t in texts
+        ]
+    return classify
+
+
+POLITE_WORDS = ("thank you so much for your kind help today " * 75).strip()  # 600 words
+
+
+def test_long_polite_field_then_toxic_field_fails():
+    scanner = ToxicityScanner(threshold=0.8, classifier=_keyword_classifier())
+    parsed = {"notes": POLITE_WORDS, "customer": "you stupid idiot pay me now"}
+    result = scanner.check("<raw json unused>", context={"parsed": parsed})
+    assert result.passed is False
+    assert result.score == 0.97
+
+
+def test_toxic_content_past_chunk_size_fails():
+    seen = []
+    classify = _keyword_classifier()
+
+    def recording(texts):
+        seen.append(texts)
+        return classify(texts)
+
+    scanner = ToxicityScanner(threshold=0.8, classifier=recording)
+    result = scanner.check(POLITE_WORDS + " you stupid idiot pay me now")
+    assert len(seen) == 1 and len(seen[0]) > 1  # one batch call, several chunks
+    assert "idiot" not in seen[0][0]            # toxic part is past the first chunk
+    assert result.passed is False
+
+
+def test_max_over_toxic_labels_threat_beats_toxic():
+    scanner = ToxicityScanner(threshold=0.8, classifier=_toxic_bert(0.75, threat=0.95))
+    result = scanner.check("I know where you live")
+    assert result.passed is False
+    assert result.score == 0.95
