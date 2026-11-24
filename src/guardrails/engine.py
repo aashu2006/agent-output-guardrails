@@ -105,6 +105,7 @@ class GuardrailEngine:
                 "GuardrailEngine.run() requires an LLMProvider. Pass provider=... to __init__."
             )
 
+        t_run_start = time.perf_counter()
         reask_engine = ReaskEngine(
             provider=self.provider, max_retries=self.config.max_retries
         )
@@ -123,12 +124,17 @@ class GuardrailEngine:
 
             # Check if re-ask should trigger
             if decision.action == Action.REASK and reask_engine.retries_left > 0:
+                previous_output = candidate
                 candidate = reask_engine.reask(
                     original_prompt=prompt,
                     feedback=decision.reason,
                     source=source,
+                    previous_candidate=previous_output,
                     **kwargs,
                 )
                 continue
 
+            # Record cumulative metrics
+            decision.metadata["attempts"] = reask_engine.attempts
+            decision.timings["total_run"] = time.perf_counter() - t_run_start
             return decision

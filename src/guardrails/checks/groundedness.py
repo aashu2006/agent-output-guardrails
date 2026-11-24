@@ -136,6 +136,7 @@ class GroundednessChecker(Guardrail):
         t_low: float = DEFAULT_T_LOW,
         t_ground: float = DEFAULT_T_GROUND,
         top_k: int = 3,
+        max_source_chunks: int = 50,
         embedder: Callable[[str, list[str]], list[float]] | None = None,
         nli_classifier: Callable[[str, str], float] | None = None,
         min_words: int = MIN_CLAIM_WORDS,
@@ -145,12 +146,14 @@ class GroundednessChecker(Guardrail):
         - t_low: Minimum cosine similarity to avoid early rejection (score 0.0).
         - t_ground: Minimum NLI entailment probability required for claim to be considered grounded.
         - top_k: Number of highest-similarity chunks evaluated per claim.
+        - max_source_chunks: Maximum source chunks to evaluate to prevent latency blowup.
         - embedder: Optional custom (query, docs) -> similarities callable.
         - nli_classifier: Optional custom (premise, hypothesis) -> entailment_prob callable.
         """
         self.t_low = t_low
         self.t_ground = t_ground
         self.top_k = max(1, top_k)
+        self.max_source_chunks = max(1, max_source_chunks)
         self.min_words = min_words
         self._embedder = embedder
         self._nli_classifier = nli_classifier
@@ -186,19 +189,35 @@ class GroundednessChecker(Guardrail):
 
         try:
             from transformers import pipeline
-            nli_pipe = pipeline("text-classification", model="cross-encoder/nli-deberta-v3-xsmall")
+            nli_pipe = pipeline(
+                "text-classification",
+                model="cross-encoder/nli-deberta-v3-xsmall",
+                top_k=None,
+                truncation=True,
+            )
 
             def _hf_nli(premise: str, hypothesis: str) -> float:
-                # Cross-encoder outputs entailment, neutral, contradiction
-                res = nli_pipe(f"{premise} [SEP] {hypothesis}")
+                # Proper HuggingFace cross-encoder text pair format
+                try:
+                    res = nli_pipe({"text": premise, "text_pair": hypothesis})
+                except Exception:
+                    res = nli_pipe(f"{premise} [SEP] {hypothesis}")
+
                 if isinstance(res, list) and res:
-                    label = str(res[0].get("label", "")).lower()
-                    score = float(res[0].get("score", 0.0))
-                    if "entail" in label:
-                        return score
-                    if "contradict" in label:
+                    items = res[0] if isinstance(res[0], list) else res
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        lbl = str(item.get("label", "")).lower()
+                        if "entail" in lbl:
+                            return float(item.get("score", 0.0))
+                    # Fallback if no explicit entailment label
+                    top_item = items[0]
+                    lbl = str(top_item.get("label", "")).lower()
+                    score = float(top_item.get("score", 0.0))
+                    if "contradict" in lbl:
                         return 0.0
-                    return 1.0 - score  # neutral downweighted
+                    return 1.0 - score
                 return 0.0
 
             self._nli_classifier = _hf_nli
@@ -255,6 +274,8 @@ class GroundednessChecker(Guardrail):
 
         # Step 3: Chunk + embed source
         chunks = _chunk_text(source_str, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP)
+        if len(chunks) > self.max_source_chunks:
+            chunks = chunks[:self.max_source_chunks]
         embed_fn = self._get_embedder()
         nli_fn = None  # Lazy initialize NLI only if a claim needs it
 

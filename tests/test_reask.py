@@ -153,3 +153,34 @@ def test_engine_run_modifies_on_pii_without_reask():
     assert decision.action == Action.MODIFY
     assert "[REDACTED_EMAIL]" in decision.output
     assert provider.call_count == 1  # Cleaned directly, no retry needed
+
+
+def test_repair_prompt_includes_previous_candidate():
+    provider = FakeProvider(responses=["dummy"])
+    engine = ReaskEngine(provider=provider, max_retries=2)
+
+    prompt = engine.build_repair_prompt(
+        original_prompt="Return user JSON",
+        feedback="age must be integer",
+        previous_candidate='{"name": "Alice", "age": "twenty"}',
+    )
+
+    assert "[PREVIOUS RESPONSE]" in prompt
+    assert '{"name": "Alice", "age": "twenty"}' in prompt
+    assert "[VALIDATION FEEDBACK]" in prompt
+
+
+def test_decision_metadata_includes_attempts_and_total_run_timing():
+    broken = '{"name": "Alice", "age": "twenty"}'
+    fixed = '{"name": "Alice", "age": 20}'
+
+    provider = FakeProvider(responses=[broken, fixed])
+    config = PolicyConfig(enabled=["schema"], max_retries=2)
+    engine = GuardrailEngine(User, config=config, provider=provider)
+
+    decision = engine.run("Give user")
+
+    assert decision.action == Action.ALLOW
+    assert decision.metadata["attempts"] == 1
+    assert "total_run" in decision.timings
+    assert decision.timings["total_run"] >= 0.0

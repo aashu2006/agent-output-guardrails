@@ -20,14 +20,22 @@ class ReaskEngine:
         original_prompt: str,
         feedback: str,
         source: str | None = None,
+        previous_candidate: str | None = None,
     ) -> str:
         """Constructs an unambiguous repair prompt with original context and actionable feedback."""
         parts = [
             original_prompt.strip(),
             "\n[VALIDATION FEEDBACK]",
             f"Your previous response failed validation:\n{feedback.strip()}",
-            "Please return a corrected response strictly adhering to the required schema and constraints.",
         ]
+        if previous_candidate and str(previous_candidate).strip():
+            parts.extend([
+                "\n[PREVIOUS RESPONSE]",
+                str(previous_candidate).strip(),
+            ])
+        parts.append(
+            "Please return a corrected response strictly adhering to the required schema and constraints."
+        )
         if source and str(source).strip():
             parts.extend([
                 "\n[REFERENCE CONTEXT]",
@@ -41,6 +49,7 @@ class ReaskEngine:
         original_prompt: str,
         feedback: str,
         source: str | None = None,
+        previous_candidate: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Increments attempt counter, builds repair prompt, and requests a corrected completion."""
@@ -53,5 +62,6 @@ class ReaskEngine:
             original_prompt=original_prompt,
             feedback=feedback,
             source=source,
+            previous_candidate=previous_candidate,
         )
         return self.provider.complete(repair_prompt, **kwargs)
