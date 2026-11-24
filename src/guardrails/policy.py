@@ -1,3 +1,4 @@
+import re
 import uuid
 from enum import Enum
 from pydantic import BaseModel, Field
@@ -19,6 +20,39 @@ class Decision(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+_SAFE_KEY = re.compile(r"^[a-z_]{1,32}$")
+
+
+def _safe_counts(metadata: dict) -> dict:
+    """Whitelist: only numeric/bool values (scores, counts, flags) and {category: int} count maps.
+    Never parsed values, lists, or strings (which may carry raw text / PII)."""
+    out: dict = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not _SAFE_KEY.match(key):
+            continue
+        if isinstance(value, (bool, int, float)):
+            out[key] = value
+        elif isinstance(value, dict) and all(
+            isinstance(k, str) and _SAFE_KEY.match(k) and isinstance(v, int) and not isinstance(v, bool)
+            for k, v in value.items()
+        ):
+            out[key] = dict(value)
+    return out
+
+
+def _safe_summary(agg: AggregatedResults) -> dict:
+    checks = {}
+    for r in agg.results:
+        summary: dict = {"passed": r.passed, "error": r.error}
+        if r.score is not None:
+            summary["score"] = r.score
+        counts = _safe_counts(r.metadata)
+        if counts:
+            summary["counts"] = counts
+        checks[r.guardrail] = summary
+    return {"checks": checks}
+
+
 class PolicyEngine:
     """Phase 1: fail closed, modify, allow. REASK activates in Phase 2."""
 
@@ -28,10 +62,8 @@ class PolicyEngine:
         candidate: str,
         retries_left: int = 0,
     ) -> Decision:
-        # Collect metadata from all individual checks
-        collected_metadata: dict = {
-            r.guardrail: r.metadata for r in agg.results if r.metadata
-        }
+        # Whitelisted per-check summary only (never raw check metadata)
+        collected_metadata: dict = _safe_summary(agg)
 
         # 1. koi check crash hua -> fail closed, uska semantic action nahi chalta
         for r in agg.results:
@@ -72,6 +104,13 @@ class PolicyEngine:
         # 4. groundedness fail -> Step 7: fail -> RE-ASK with source; budget out -> BLOCK
         groundedness = agg.get("groundedness")
         if groundedness and not groundedness.passed:
+            # no source -> re-asking cannot help: fail closed straight away
+            if groundedness.metadata.get("missing_source"):
+                return Decision(
+                    action=Action.BLOCK,
+                    reason=f"cannot verify against source: {groundedness.reason}",
+                    metadata=collected_metadata,
+                )
             if retries_left > 0:
                 return Decision(
                     action=Action.REASK,

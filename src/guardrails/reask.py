@@ -3,10 +3,14 @@ from typing import Any
 from guardrails.providers import LLMProvider
 
 
+# Any bracketed section-header-like token, any case: [REFERENCE CONTEXT], [Reference Context],
+# [ previous response ], [SYSTEM], [instructions/override]. JSON arrays ([1, 2], ["a"]) don't match.
+_BRACKET_HEADER = re.compile(r"\[\s*([A-Za-z][A-Za-z0-9 _/\-]{0,60}?)\s*\]")
+
+
 def _sanitize_untrusted_prompt_text(text: str) -> str:
-    """Neutralizes spoofed delimiter headers in untrusted model outputs to prevent prompt injection."""
-    sanitized = text.strip()
-    return re.sub(r"\[([A-Z_ ]+)\]", r"(\1)", sanitized)
+    """Neutralizes spoofed delimiter headers in untrusted text (model output, feedback, RAG source)."""
+    return _BRACKET_HEADER.sub(r"(\1)", text.strip())
 
 
 class ReaskEngine:
@@ -46,7 +50,7 @@ class ReaskEngine:
             "Please return a corrected response strictly adhering to the required schema and constraints."
         )
         if source and str(source).strip():
-            safe_source = str(source).strip()
+            safe_source = _sanitize_untrusted_prompt_text(str(source))
             parts.extend([
                 "\n[REFERENCE CONTEXT]",
                 safe_source,

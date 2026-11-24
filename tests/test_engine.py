@@ -55,8 +55,8 @@ def test_engine_skips_toxicity_when_not_in_enabled():
 def test_engine_runs_groundedness_in_parallel():
     from guardrails.checks.groundedness import GroundednessChecker
 
-    mock_embed = lambda q, d: [0.85]
-    mock_nli = lambda p, h: 0.95  # fully grounded
+    mock_embed = lambda claims, chunks: [[0.85] * len(chunks) for _ in claims]
+    mock_nli = lambda pairs: [0.95 for _ in pairs]  # fully grounded
     grounded_checker = GroundednessChecker(embedder=mock_embed, nli_classifier=mock_nli)
 
     config = PolicyConfig(enabled=["schema", "pii", "groundedness"])
@@ -75,7 +75,7 @@ def test_engine_runs_groundedness_in_parallel():
 def test_engine_blocks_ungrounded_output():
     from guardrails.checks.groundedness import GroundednessChecker
 
-    mock_embed = lambda q, d: [0.10]  # below t_low -> ungrounded
+    mock_embed = lambda claims, chunks: [[0.10] * len(chunks) for _ in claims]  # below t_low -> ungrounded
     grounded_checker = GroundednessChecker(embedder=mock_embed)
 
     config = PolicyConfig(enabled=["schema", "groundedness"])

@@ -6,8 +6,8 @@ from pydantic import BaseModel
 
 from guardrails.aggregator import AggregatedResults
 from guardrails.checks.groundedness import GroundednessChecker
-from guardrails.checks.pii import PIIScanner
-from guardrails.checks.schema import SchemaValidator
+from guardrails.checks.pii import PIIScanner, _redact_text
+from guardrails.checks.schema import SchemaValidator, extract_fenced_json
 from guardrails.checks.toxicity import ToxicityScanner
 from guardrails.config import PolicyConfig
 from guardrails.policy import Action, Decision, PolicyEngine
@@ -36,6 +36,7 @@ class GuardrailEngine:
         self.groundedness_check = groundedness_checker or GroundednessChecker(
             t_low=self.config.groundedness_t_low,
             t_ground=self.config.groundedness_threshold,
+            on_missing_source=self.config.groundedness_on_missing_source,
         )
         self.policy = PolicyEngine()
 
@@ -55,14 +56,23 @@ class GuardrailEngine:
         timings["schema"] = time.perf_counter() - t
         results = [schema_result]
 
+        # What ships on ALLOW/MODIFY: the JSON itself. If the schema gate had to pull it out of a
+        # code fence, ship the extracted JSON and never the raw candidate (prose is dropped).
+        output_text = candidate
+        outside_text = None
+        if schema_result.passed and schema_result.metadata.get("fence_stripped"):
+            extracted = extract_fenced_json(candidate)
+            if extracted is not None:
+                output_text, outside_text = extracted[0], (extracted[1] or None)
+
         # stage 2: remaining checks in parallel on the same immutable candidate
+        parallel_checks = []
         if schema_result.passed:
-            parallel_checks = []
             parsed_data = schema_result.metadata.get("parsed")
 
             if "pii" in self.config.enabled:
                 parallel_checks.append(
-                    (self.pii_check, {"parsed": parsed_data})
+                    (self.pii_check, {"parsed": parsed_data, "outside_text": outside_text})
                 )
             if "toxicity" in self.config.enabled:
                 parallel_checks.append(
@@ -73,21 +83,29 @@ class GuardrailEngine:
                 parallel_checks.append(
                     (self.groundedness_check, {"source": src, "parsed": parsed_data})
                 )
+        else:
+            # schema failed: still screen the raw text so a toxic output is BLOCKed, never re-asked
+            if "toxicity" in self.config.enabled:
+                parallel_checks.append((self.toxicity_check, {}))
+            if "pii" in self.config.enabled:
+                parallel_checks.append((self.pii_check, {}))
 
-            if parallel_checks:
-                t = time.perf_counter()
-                with ThreadPoolExecutor(max_workers=3) as pool:
-                    futures = [
-                        pool.submit(check.check, candidate, ctx)
-                        for check, ctx in parallel_checks
-                    ]
-                    results.extend(f.result() for f in futures)
-                timings["parallel"] = time.perf_counter() - t
+        if parallel_checks:
+            t = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = [
+                    pool.submit(check.check, candidate, ctx)
+                    for check, ctx in parallel_checks
+                ]
+                results.extend(f.result() for f in futures)
+            timings["parallel"] = time.perf_counter() - t
 
         # stage 3: aggregate + decide
+        t = time.perf_counter()
         decision = self.policy.decide(
-            AggregatedResults(results=results), candidate, retries_left=retries_left
+            AggregatedResults(results=results), output_text, retries_left=retries_left
         )
+        timings["policy"] = time.perf_counter() - t
         timings["total"] = time.perf_counter() - t0
         decision.timings = timings
         return decision
@@ -110,8 +128,20 @@ class GuardrailEngine:
             provider=self.provider, max_retries=self.config.max_retries
         )
 
+        def _provider_failure(exc: Exception) -> Decision:
+            # provider crash -> fail closed, never escape run()
+            return Decision(
+                action=Action.BLOCK,
+                reason=f"internal error in provider: {type(exc).__name__}",
+                metadata={"attempts": reask_engine.attempts},
+                timings={"total_run": time.perf_counter() - t_run_start},
+            )
+
         # 1. Initial generation
-        candidate = self.provider.complete(prompt, **kwargs)
+        try:
+            candidate = self.provider.complete(prompt, **kwargs)
+        except Exception as exc:
+            return _provider_failure(exc)
 
         # 2. Validation & bounded repair loop
         while True:
@@ -124,14 +154,19 @@ class GuardrailEngine:
 
             # Check if re-ask should trigger
             if decision.action == Action.REASK and reask_engine.retries_left > 0:
-                previous_output = candidate
-                candidate = reask_engine.reask(
-                    original_prompt=prompt,
-                    feedback=decision.reason,
-                    source=source,
-                    previous_candidate=previous_output,
-                    **kwargs,
-                )
+                # never send raw PII back to the provider (toxic text never gets here:
+                # toxicity is screened even on schema failure and BLOCKs first)
+                redacted_previous, _ = _redact_text(candidate)
+                try:
+                    candidate = reask_engine.reask(
+                        original_prompt=prompt,
+                        feedback=decision.reason,
+                        source=source,
+                        previous_candidate=redacted_previous,
+                        **kwargs,
+                    )
+                except Exception as exc:
+                    return _provider_failure(exc)
                 continue
 
             # Record cumulative metrics

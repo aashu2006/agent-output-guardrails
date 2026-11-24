@@ -1,7 +1,6 @@
 import re
-import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 from guardrails.base import Guardrail
 from guardrails.results import GuardrailResult
 
@@ -12,14 +11,51 @@ DEFAULT_CHUNK_SIZE = 200  # Words/tokens per source chunk
 DEFAULT_CHUNK_OVERLAP = 40
 MIN_CLAIM_WORDS = 4       # Skip fragments < 4 words
 
-# Common greetings and conversational meta-phrases to filter out
-GREETING_PATTERNS = [
-    re.compile(r"^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening|day))\b", re.I),
-    re.compile(r"\b(thanks|thank\s+you|you('re|\s+are)\s+welcome)\b", re.I),
-    re.compile(r"\b(have\s+a\s+(great|nice|wonderful|good)\s+day)\b", re.I),
-    re.compile(r"^(sure|certainly|of\s+course)[\s,!.:-]*(here\s+(is|are).*)?$", re.I),
-    re.compile(r"^here\s+(is|are)(\s+the)?(\s+information|\s+answer|\s+response)?[\s,!.:-]*$", re.I),
-    re.compile(r"^(based\s+on\s+the\s+(provided\s+)?(context|text|document|source))", re.I),
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-xsmall"
+
+# Batched interfaces:
+#   embedder(claims, chunks) -> similarity matrix, shape [len(claims)][len(chunks)]
+#   nli_classifier([(premise, hypothesis), ...]) -> entailment probability per pair
+Embedder = Callable[[list[str], list[str]], list[list[float]]]
+NLIClassifier = Callable[[list[tuple[str, str]]], list[float]]
+
+_PUNCT = r"[\s]*[,!.:;\-–—]+\s*"
+
+# Leading filler that is stripped before the rest of the sentence is checked as a claim.
+# Anchored at the start; each alternative must end in punctuation so real content is never eaten.
+FILLER_PREFIX = re.compile(
+    r"^(?:"
+    r"(?:hello|hi|hey|greetings|good\s+(?:morning|afternoon|evening|day))(?:\s+there)?" + _PUNCT + r"|"
+    r"(?:sure|certainly|of\s+course|absolutely|okay|ok|great)" + _PUNCT + r"|"
+    r"(?:sure|certainly|of\s+course|absolutely)\s+(?=here\s+(?:is|are)\b)|"
+    r"here\s+(?:is|are)(?:\s+the)?"
+    r"(?:\s+(?:information|answer|response|summary|details|result|results))?"
+    r"(?:\s+you\s+(?:asked|requested)\s+for)?" + _PUNCT + r"|"
+    r"(?:based\s+on|according\s+to)\s+the\s+(?:provided\s+|given\s+|available\s+)?"
+    r"(?:context|text|document|documents|source|sources|information|data)" + _PUNCT +
+    r")",
+    re.I,
+)
+
+# Whole-sentence chatter: a sentence is skipped only if it fully matches one of these
+# (after leading filler is stripped and trailing punctuation removed).
+CHATTER_PATTERNS = [
+    re.compile(p, re.I)
+    for p in [
+        r"(?:hello|hi|hey|greetings|good\s+(?:morning|afternoon|evening|day))(?:\s+\w+)?",
+        r"(?:many\s+)?(?:thanks|thank\s+you)(?:\s+(?:so|very)\s+much)?(?:\s+for\s+.*)?",
+        r"you(?:'re|\s+are)\s+(?:very\s+|most\s+)?welcome.*",
+        r"(?:i\s+)?hope\s+(?:this|that|it|the\s+above)\s+(?:helps|is\s+helpful|answers\s+your\s+question).*",
+        r"(?:please\s+)?(?:do\s+)?let\s+me\s+know\b.*",
+        r"(?:please\s+)?(?:feel\s+free|don'?t\s+hesitate|do\s+not\s+hesitate)\s+to\b.*",
+        r"if\s+you\s+(?:have|need)\s+(?:any\s+)?(?:other\s+|more\s+|further\s+|additional\s+)?"
+        r"(?:questions|help|assistance|information|clarification).*",
+        r"(?:i'?m|i\s+am)\s+(?:happy|glad)\s+to\s+help.*",
+        r"(?:glad|happy)\s+(?:i\s+could|to)\s+help.*",
+        r"have\s+a\s+(?:great|nice|wonderful|good|lovely)\s+(?:day|evening|week|weekend|one).*",
+        r"(?:is\s+there\s+)?anything\s+else\s+i\s+can\s+(?:help|do).*",
+    ]
 ]
 
 # Titles that are never sentence endings
@@ -68,25 +104,34 @@ def _split_sentences(text: str) -> list[str]:
     return sentences
 
 
+def _extract_claim(sentence: str, min_words: int = MIN_CLAIM_WORDS) -> str | None:
+    """Returns the checkable claim text, or None when the sentence is not a claim.
+
+    Leading filler ("Sure, here is the answer:", "Based on the provided context,") is
+    stripped and the REST is checked. A sentence is skipped only when it is a question,
+    pure chatter/filler, or a fragment shorter than min_words."""
+    text = sentence.strip()
+    if not text or text.endswith("?"):
+        return None
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = FILLER_PREFIX.sub("", text, count=1).strip()
+
+    core = text.rstrip(" .!")
+    if not core:
+        return None
+    if any(p.fullmatch(core) for p in CHATTER_PATTERNS):
+        return None
+    if len(text.split()) < min_words:
+        return None
+    return text[0].upper() + text[1:]
+
+
 def _is_claim(sentence: str, min_words: int = MIN_CLAIM_WORDS) -> bool:
-    """Claim filter: skips questions, greetings, meta-talk, and short fragments (< min_words)."""
-    clean = sentence.strip()
-    words = clean.split()
-    if len(words) < min_words:
-        return False
-
-    # Skip questions
-    if clean.endswith("?"):
-        return False
-    if re.match(r"^(who|what|where|when|why|how|is|are|can|could|would|should|do|does|did)\b", clean, re.I) and "?" in clean:
-        return False
-
-    # Skip greetings and meta chatter
-    for pattern in GREETING_PATTERNS:
-        if pattern.search(clean):
-            return False
-
-    return True
+    """Claim filter: skips questions, pure chatter/filler, and short fragments (< min_words)."""
+    return _extract_claim(sentence, min_words) is not None
 
 
 def _chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = DEFAULT_CHUNK_OVERLAP) -> list[str]:
@@ -107,27 +152,6 @@ def _chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = 
     return chunks
 
 
-def _default_lexical_similarity(text1: str, text2: str) -> float:
-    """Fast fallback lexical/token cosine similarity if no vector embedder is injected."""
-    def _term_vec(s: str) -> dict[str, int]:
-        vec: dict[str, int] = {}
-        for w in re.findall(r"\w+", s.lower()):
-            vec[w] = vec.get(w, 0) + 1
-        return vec
-
-    v1, v2 = _term_vec(text1), _term_vec(text2)
-    if not v1 or not v2:
-        return 0.0
-
-    common = set(v1.keys()) & set(v2.keys())
-    dot = sum(v1[k] * v2[k] for k in common)
-    mag1 = math.sqrt(sum(v ** 2 for v in v1.values()))
-    mag2 = math.sqrt(sum(v ** 2 for v in v2.values()))
-    if mag1 == 0 or mag2 == 0:
-        return 0.0
-    return dot / (mag1 * mag2)
-
-
 class GroundednessChecker(Guardrail):
     name = "groundedness"
 
@@ -136,108 +160,117 @@ class GroundednessChecker(Guardrail):
         t_low: float = DEFAULT_T_LOW,
         t_ground: float = DEFAULT_T_GROUND,
         top_k: int = 3,
-        max_source_chunks: int = 50,
-        embedder: Callable[[str, list[str]], list[float]] | None = None,
-        nli_classifier: Callable[[str, str], float] | None = None,
+        max_source_chunks: int | None = None,
+        embedder: Embedder | None = None,
+        nli_classifier: NLIClassifier | None = None,
         min_words: int = MIN_CLAIM_WORDS,
+        on_missing_source: Literal["block", "skip"] = "block",
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        nli_model: str = DEFAULT_NLI_MODEL,
     ):
         """
         Groundedness checker adhering to the 'Cosine only rejects, NLI decides' architecture.
         - t_low: Minimum cosine similarity to avoid early rejection (score 0.0).
         - t_ground: Minimum NLI entailment probability required for claim to be considered grounded.
-        - top_k: Number of highest-similarity chunks evaluated per claim.
-        - max_source_chunks: Maximum source chunks to evaluate to prevent latency blowup.
-        - embedder: Optional custom (query, docs) -> similarities callable.
-        - nli_classifier: Optional custom (premise, hypothesis) -> entailment_prob callable.
+        - top_k: Number of highest-similarity chunks sent to NLI per claim.
+        - max_source_chunks: Optional cap on source chunks. None (default) ranks across ALL chunks;
+          when a cap truncates the source, metadata records source_truncated=True.
+        - embedder: Optional batched (claims, chunks) -> similarity-matrix callable.
+        - nli_classifier: Optional batched [(premise, hypothesis)] -> entailment-probs callable.
+        - on_missing_source: "block" (default) fails closed when no source is given; "skip" passes.
         """
+        if on_missing_source not in ("block", "skip"):
+            raise ValueError("on_missing_source must be 'block' or 'skip'")
         self.t_low = t_low
         self.t_ground = t_ground
         self.top_k = max(1, top_k)
-        self.max_source_chunks = max(1, max_source_chunks)
+        self.max_source_chunks = None if max_source_chunks is None else max(1, max_source_chunks)
         self.min_words = min_words
+        self.on_missing_source = on_missing_source
+        self.embedding_model = embedding_model
+        self.nli_model = nli_model
         self._embedder = embedder
         self._nli_classifier = nli_classifier
 
-    def _get_embedder(self) -> Callable[[str, list[str]], list[float]]:
+    def _get_embedder(self) -> Embedder:
         if self._embedder is not None:
             return self._embedder
 
-        # Try sentence-transformers bi-encoder if available, else lexical cosine
+        # No silent fallback: if the bi-encoder can't load, raise -> crash-safe error result -> BLOCK
         try:
             from sentence_transformers import SentenceTransformer, util
-            model = SentenceTransformer("all-MiniLM-L6-v2")
+        except ImportError as e:
+            raise ImportError(
+                "GroundednessChecker default embedder requires sentence-transformers "
+                "(pip install -e '.[ml]') or an injected embedder callable."
+            ) from e
+        model = SentenceTransformer(self.embedding_model)
 
-            def _st_embedder(query: str, docs: list[str]) -> list[float]:
-                q_emb = model.encode(query, convert_to_tensor=True)
-                d_emb = model.encode(docs, convert_to_tensor=True)
-                sims = util.cos_sim(q_emb, d_emb)[0].tolist()
-                return [float(s) for s in sims]
+        def _st_embedder(claims: list[str], chunks: list[str]) -> list[list[float]]:
+            # Source chunks encoded once per call, all claims batch-encoded in one call
+            chunk_emb = model.encode(chunks, convert_to_tensor=True, batch_size=32)
+            claim_emb = model.encode(claims, convert_to_tensor=True, batch_size=32)
+            return util.cos_sim(claim_emb, chunk_emb).tolist()
 
-            self._embedder = _st_embedder
-            return self._embedder
-        except Exception:
-            # Fallback to zero-dependency term-cosine
-            def _fallback_embedder(query: str, docs: list[str]) -> list[float]:
-                return [_default_lexical_similarity(query, d) for d in docs]
+        self._embedder = _st_embedder
+        return self._embedder
 
-            self._embedder = _fallback_embedder
-            return self._embedder
-
-    def _get_nli(self) -> Callable[[str, str], float]:
+    def _get_nli(self) -> NLIClassifier:
         if self._nli_classifier is not None:
             return self._nli_classifier
 
         try:
             from transformers import pipeline
-            nli_pipe = pipeline(
-                "text-classification",
-                model="cross-encoder/nli-deberta-v3-xsmall",
-                top_k=None,
-                truncation=True,
-            )
-
-            def _hf_nli(premise: str, hypothesis: str) -> float:
-                # Proper HuggingFace cross-encoder text pair format
-                try:
-                    res = nli_pipe({"text": premise, "text_pair": hypothesis})
-                except Exception:
-                    res = nli_pipe(f"{premise} [SEP] {hypothesis}")
-
-                if isinstance(res, list) and res:
-                    items = res[0] if isinstance(res[0], list) else res
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        lbl = str(item.get("label", "")).lower()
-                        if "entail" in lbl:
-                            return float(item.get("score", 0.0))
-                    # Fallback if no explicit entailment label
-                    top_item = items[0]
-                    lbl = str(top_item.get("label", "")).lower()
-                    score = float(top_item.get("score", 0.0))
-                    if "contradict" in lbl:
-                        return 0.0
-                    return 1.0 - score
-                return 0.0
-
-            self._nli_classifier = _hf_nli
-            return self._nli_classifier
-        except Exception as e:
+        except ImportError as e:
             raise ImportError(
-                "NLI classifier requires transformers and torch or a mock callable."
+                "NLI classifier requires transformers and torch or an injected callable."
             ) from e
+        nli_pipe = pipeline(
+            "text-classification",
+            model=self.nli_model,
+            top_k=None,
+            truncation=True,
+            batch_size=16,
+        )
+
+        def _hf_nli(pairs: list[tuple[str, str]]) -> list[float]:
+            # Proper cross-encoder text-pair input, all pairs in one batched call
+            outputs = nli_pipe([{"text": p, "text_pair": h} for p, h in pairs])
+            scores = []
+            for out in outputs:
+                items = out if isinstance(out, list) else [out]
+                entail = next(
+                    (float(i["score"]) for i in items
+                     if isinstance(i, dict) and "entail" in str(i.get("label", "")).lower()),
+                    None,
+                )
+                if entail is None:
+                    raise ValueError("NLI model returned no entailment label")
+                scores.append(entail)
+            return scores
+
+        self._nli_classifier = _hf_nli
+        return self._nli_classifier
 
     def _check(self, candidate: str, context: dict | None = None) -> GuardrailResult:
         context = context or {}
         source = context.get("source")
 
-        # Note 2: No source given -> skip the check, passed=True, note it in metadata
-        if not source or not str(source).strip():
+        # No source: fail closed by default; "skip" mode passes and records it
+        if source is None or not str(source).strip():
+            if self.on_missing_source == "skip":
+                return GuardrailResult(
+                    guardrail=self.name,
+                    passed=True,
+                    score=1.0,
+                    metadata={"skipped": "no_source", "missing_source": True},
+                )
             return GuardrailResult(
                 guardrail=self.name,
-                passed=True,
-                score=1.0,
-                metadata={"skipped": "no_source", "reason": "no source context provided"},
+                passed=False,
+                score=0.0,
+                reason="no source provided: groundedness cannot be verified",
+                metadata={"missing_source": True},
             )
 
         source_str = str(source).strip()
@@ -254,90 +287,96 @@ class GroundednessChecker(Guardrail):
         for txt in raw_texts:
             sentences.extend(_split_sentences(txt))
 
-        if not sentences:
-            return GuardrailResult(
-                guardrail=self.name,
-                passed=True,
-                score=1.0,
-                metadata={"claims_evaluated": 0},
-            )
+        # Step 2: Claim filter. Only indices/counts go to metadata, never sentence text.
+        claims: list[tuple[int, str]] = []
+        skipped_indices: list[int] = []
+        for idx, sentence in enumerate(sentences):
+            claim = _extract_claim(sentence, self.min_words)
+            if claim is None:
+                skipped_indices.append(idx)
+            else:
+                claims.append((idx, claim))
 
-        # Step 2: Claim filter (skip questions, greetings, meta, < min_words)
-        claims = [s for s in sentences if _is_claim(s, self.min_words)]
+        base_meta: dict[str, Any] = {
+            "threshold": self.t_ground,
+            "t_low": self.t_low,
+            "sentences_total": len(sentences),
+            "sentences_skipped": len(skipped_indices),
+            "skipped_sentence_indices": skipped_indices,
+            "claims_evaluated": len(claims),
+        }
+
         if not claims:
             return GuardrailResult(
                 guardrail=self.name,
                 passed=True,
                 score=1.0,
-                metadata={"claims_evaluated": 0, "skipped_sentences": sentences},
+                metadata={**base_meta, "score": 1.0, "ungrounded_count": 0, "ungrounded_indices": []},
             )
 
-        # Step 3: Chunk + embed source
+        # Step 3: Chunk source; rank across ALL chunks unless an explicit cap is configured
         chunks = _chunk_text(source_str, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP)
-        if len(chunks) > self.max_source_chunks:
+        total_chunks = len(chunks)
+        truncated = False
+        if self.max_source_chunks is not None and total_chunks > self.max_source_chunks:
             chunks = chunks[:self.max_source_chunks]
-        embed_fn = self._get_embedder()
-        nli_fn = None  # Lazy initialize NLI only if a claim needs it
+            truncated = True
 
-        claim_scores: dict[str, float] = {}
-        claim_details: list[dict[str, Any]] = []
+        claim_texts = [c for _, c in claims]
+        sim_matrix = self._get_embedder()(claim_texts, chunks)
+        if len(sim_matrix) != len(claims) or any(len(row) != len(chunks) for row in sim_matrix):
+            raise ValueError("embedder returned a similarity matrix of the wrong shape")
 
-        for claim in claims:
-            similarities = embed_fn(claim, chunks)
-            if similarities:
-                # Rank chunks by similarity descending
-                ranked_chunks = sorted(
-                    enumerate(similarities), key=lambda x: x[1], reverse=True
-                )
-                top_candidates = ranked_chunks[:self.top_k]
-                best_sim = top_candidates[0][1]
-            else:
-                top_candidates = [(0, 0.0)]
-                best_sim = 0.0
+        # Step 4: Cosine only rejects. Collect every NLI pair, then score them in ONE batch.
+        nli_pairs: list[tuple[str, str]] = []
+        pair_owner: list[int] = []
+        best_sims: list[float] = []
+        for ci, (_, claim) in enumerate(claims):
+            sims = [float(x) for x in sim_matrix[ci]]
+            ranked = sorted(range(len(sims)), key=lambda j: sims[j], reverse=True)
+            best_sims.append(sims[ranked[0]] if ranked else 0.0)
+            for j in ranked[:self.top_k]:
+                if sims[j] >= self.t_low:
+                    nli_pairs.append((chunks[j], claim))
+                    pair_owner.append(ci)
 
-            # Step 4: Cosine >= T_low?
-            if best_sim < self.t_low:
-                # UNGROUNDED: no related source, skip NLI, score = 0.0
-                claim_score = 0.0
-                claim_scores[claim] = claim_score
-                claim_details.append({
-                    "claim": claim,
-                    "best_sim": round(best_sim, 4),
-                    "action": "rejected_by_cosine",
-                    "score": claim_score,
-                })
-            else:
-                # Step 5: NLI (DeBERTa) decides every real claim
-                if nli_fn is None:
-                    nli_fn = self._get_nli()
+        nli_scores: list[float] = []
+        if nli_pairs:
+            nli_scores = [float(x) for x in self._get_nli()(nli_pairs)]
+            if len(nli_scores) != len(nli_pairs):
+                raise ValueError("NLI classifier returned the wrong number of scores")
 
-                # Evaluate NLI against top candidate chunks that pass t_low, take max entailment
-                candidate_nli_scores = []
-                for idx, sim in top_candidates:
-                    if sim < self.t_low:
-                        continue
-                    chunk_text = chunks[idx] if idx < len(chunks) else source_str
-                    candidate_nli_scores.append(float(nli_fn(chunk_text, claim)))
+        # Step 5: per-claim score = max entailment over its chunks (0.0 if rejected by cosine)
+        per_claim: list[list[float]] = [[] for _ in claims]
+        for owner, score in zip(pair_owner, nli_scores):
+            per_claim[owner].append(score)
 
-                claim_score = max(candidate_nli_scores) if candidate_nli_scores else 0.0
-                claim_scores[claim] = claim_score
-                claim_details.append({
-                    "claim": claim,
-                    "best_sim": round(best_sim, 4),
-                    "action": "evaluated_by_nli",
-                    "score": round(claim_score, 4),
-                    "chunks_evaluated": len(candidate_nli_scores),
-                })
+        claim_scores: list[float] = []
+        details: list[dict[str, Any]] = []
+        for ci, (sent_idx, _) in enumerate(claims):
+            evaluated = per_claim[ci]
+            score = max(evaluated) if evaluated else 0.0
+            claim_scores.append(score)
+            details.append({
+                "sentence_index": sent_idx,
+                "best_sim": round(best_sims[ci], 4),
+                "action": "evaluated_by_nli" if evaluated else "rejected_by_cosine",
+                "score": round(score, 4),
+                "chunks_evaluated": len(evaluated),
+            })
 
         # Step 6: score = min(claims)
-        min_score = min(claim_scores.values()) if claim_scores else 1.0
-        ungrounded = [c for c, sc in claim_scores.items() if sc < self.t_ground]
+        min_score = min(claim_scores)
+        ungrounded_indices = [
+            claims[ci][0] for ci, sc in enumerate(claim_scores) if sc < self.t_ground
+        ]
         passed = min_score >= self.t_ground
 
         reason = (
             None
             if passed
-            else f"groundedness score {min_score:.2f} below threshold {self.t_ground:.2f}: {len(ungrounded)} ungrounded claim(s)"
+            else f"groundedness score {min_score:.2f} below threshold {self.t_ground:.2f}: "
+                 f"{len(ungrounded_indices)} ungrounded claim(s)"
         )
 
         return GuardrailResult(
@@ -346,11 +385,13 @@ class GroundednessChecker(Guardrail):
             score=round(min_score, 4),
             reason=reason,
             metadata={
+                **base_meta,
                 "score": round(min_score, 4),
-                "threshold": self.t_ground,
-                "t_low": self.t_low,
-                "claims_evaluated": len(claims),
-                "ungrounded": ungrounded,
-                "details": claim_details,
+                "ungrounded_count": len(ungrounded_indices),
+                "ungrounded_indices": ungrounded_indices,
+                "details": details,
+                "source_chunks_total": total_chunks,
+                "source_chunks_ranked": len(chunks),
+                "source_truncated": truncated,
             },
         )
