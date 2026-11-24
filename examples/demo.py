@@ -4,6 +4,7 @@ from guardrails.checks.pii import PIIScanner
 from guardrails.engine import GuardrailEngine
 from guardrails.config import PolicyConfig
 from guardrails.policy import Action
+from guardrails.providers import FakeProvider
 
 # ---------------------------------------------------------------------------
 # Beautiful Terminal UI Styling & Helper Functions
@@ -209,10 +210,87 @@ engine_v3 = GuardrailEngine(
     config=PolicyConfig(enabled=["schema", "pii", "groundedness"]),
 )
 
-d6 = engine_v3.validate(grounded_response, source=rag_source)
-print_card("4.1", "GROUNDED RAG RESPONSE (expect ALLOW)", grounded_response, d6)
+try:
+    # load the bi-encoder + NLI models up front (and run one warm-up check),
+    # so the timings below don't include model loading
+    engine_v3.groundedness_check._get_embedder()
+    engine_v3.groundedness_check._get_nli()
+    engine_v3.groundedness_check.check(
+        "Acme Corp was founded in 2012.", context={"source": rag_source}
+    )
+    grounding_loaded = True
+except ImportError:
+    print(f"{YELLOW}groundedness models not installed, run: pip install -e '.[ml]'{RESET}\n")
+    grounding_loaded = False
+except Exception as e:
+    print(f"{YELLOW}groundedness models failed to load ({type(e).__name__}), skipping section 4{RESET}\n")
+    grounding_loaded = False
 
-d7 = engine_v3.validate(hallucinated_response, source=rag_source)
-print_card("4.2", "HALLUCINATED RESPONSE (expect BLOCK)", hallucinated_response, d7)
+if grounding_loaded:
+    d6 = engine_v3.validate(grounded_response, source=rag_source)
+    print_card("4.1", "GROUNDED RAG RESPONSE (expect ALLOW)", grounded_response, d6)
+
+    d7 = engine_v3.validate(hallucinated_response, source=rag_source)
+    print_card("4.2", "HALLUCINATED RESPONSE (expect BLOCK)", hallucinated_response, d7)
+
+# ===========================================================================
+# 5. RE-ASK LOOP (engine.run with FakeProvider, no network)
+# ===========================================================================
+print_section_header(
+    "5. RE-ASK LOOP (engine.run + FakeProvider)",
+    "Generate -> Validate -> Re-ask with feedback -> Budget -> Block",
+)
+
+
+class TracingEngine(GuardrailEngine):
+    """Demo-only: records the decision of every attempt inside engine.run()."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trace = []
+
+    def validate(self, *args, **kwargs):
+        decision = super().validate(*args, **kwargs)
+        self.trace.append(decision)
+        return decision
+
+
+def print_attempts(engine, provider, final):
+    for i, d in enumerate(engine.trace, start=1):
+        if d.action == Action.REASK:
+            mark = f"{YELLOW}↻ REASK{RESET}"
+        elif d.action == Action.BLOCK:
+            mark = f"{RED}✖ BLOCK{RESET}"
+        else:
+            mark = f"{GREEN}✔ {d.action.value.upper()}{RESET}"
+        print(f"│   Attempt {i}: {mark}  {d.reason}")
+    if final.output is None:
+        out = f"{RED}(Suppressed / None - Unsafe to ship){RESET}"
+    else:
+        out = f"{GREEN}{final.output}{RESET}"
+    print(f"│   Final    : {final.action.value.upper()}")
+    print(f"│   Output   : {out}")
+    print(
+        f"│   Attempts : {len(engine.trace)} validated, provider called {provider.call_count}x, "
+        f"re-asks used {final.metadata['attempts']}/{engine.config.max_retries}"
+    )
+    print(f"└──\n")
+
+
+reask_config = PolicyConfig(enabled=["schema", "pii"], max_retries=2)
+
+# [5.1] broken JSON first, valid JSON after one re-ask
+provider_a = FakeProvider([bad_json, good])
+engine_a = TracingEngine(Invoice, config=reask_config, provider=provider_a)
+final_a = engine_a.run("Return the Acme Corp invoice as JSON.")
+print(f"┌── [5.1] BROKEN JSON, THEN FIXED ON RE-ASK (expect ALLOW on attempt 2)")
+print_attempts(engine_a, provider_a, final_a)
+
+# [5.2] provider never fixes it: budget runs out -> fail closed
+provider_b = FakeProvider([bad_json, bad_json, bad_json])
+engine_b = TracingEngine(Invoice, config=reask_config, provider=provider_b)
+final_b = engine_b.run("Return the Acme Corp invoice as JSON.")
+print(f"┌── [5.2] ALWAYS BROKEN JSON (expect BLOCK after budget runs out)")
+print_attempts(engine_b, provider_b, final_b)
 
 print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")
