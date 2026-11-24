@@ -1,5 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -9,12 +10,13 @@ from guardrails.checks.pii import PIIScanner
 from guardrails.checks.schema import SchemaValidator
 from guardrails.checks.toxicity import ToxicityScanner
 from guardrails.config import PolicyConfig
-from guardrails.policy import Decision, PolicyEngine
+from guardrails.policy import Action, Decision, PolicyEngine
+from guardrails.providers import LLMProvider
+from guardrails.reask import ReaskEngine
 
 
 class GuardrailEngine:
-    """Coordinator: runs the pipeline. Phase 1 scope: validate() only.
-    run() (provider call + re-ask loop) comes with Phase 2."""
+    """Coordinator: runs the pipeline and bounded re-ask loop."""
 
     def __init__(
         self,
@@ -22,8 +24,10 @@ class GuardrailEngine:
         config: PolicyConfig | None = None,
         toxicity_scanner: ToxicityScanner | None = None,
         groundedness_checker: GroundednessChecker | None = None,
+        provider: LLMProvider | None = None,
     ):
         self.config = config or PolicyConfig()
+        self.provider = provider
         self.schema_check = SchemaValidator(schema)
         self.pii_check = PIIScanner()
         self.toxicity_check = toxicity_scanner or ToxicityScanner(
@@ -40,6 +44,7 @@ class GuardrailEngine:
         candidate: str,
         context: dict | None = None,
         source: str | None = None,
+        retries_left: int = 0,
     ) -> Decision:
         timings: dict[str, float] = {}
         t0 = time.perf_counter()
@@ -80,7 +85,50 @@ class GuardrailEngine:
                 timings["parallel"] = time.perf_counter() - t
 
         # stage 3: aggregate + decide
-        decision = self.policy.decide(AggregatedResults(results=results), candidate)
+        decision = self.policy.decide(
+            AggregatedResults(results=results), candidate, retries_left=retries_left
+        )
         timings["total"] = time.perf_counter() - t0
         decision.timings = timings
         return decision
+
+    def run(
+        self,
+        prompt: str,
+        context: dict | None = None,
+        source: str | None = None,
+        **kwargs: Any,
+    ) -> Decision:
+        """Full Phase 2 closed loop: Provider call -> Validate -> Reask loop -> Final Decision."""
+        if self.provider is None:
+            raise ValueError(
+                "GuardrailEngine.run() requires an LLMProvider. Pass provider=... to __init__."
+            )
+
+        reask_engine = ReaskEngine(
+            provider=self.provider, max_retries=self.config.max_retries
+        )
+
+        # 1. Initial generation
+        candidate = self.provider.complete(prompt, **kwargs)
+
+        # 2. Validation & bounded repair loop
+        while True:
+            decision = self.validate(
+                candidate=candidate,
+                context=context,
+                source=source,
+                retries_left=reask_engine.retries_left,
+            )
+
+            # Check if re-ask should trigger
+            if decision.action == Action.REASK and reask_engine.retries_left > 0:
+                candidate = reask_engine.reask(
+                    original_prompt=prompt,
+                    feedback=decision.reason,
+                    source=source,
+                    **kwargs,
+                )
+                continue
+
+            return decision
