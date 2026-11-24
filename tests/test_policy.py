@@ -66,3 +66,38 @@ def test_toxicity_beats_pii_modify():
     d = _decide(_r("schema"), _r("pii", transformed="clean"), _r("toxicity", passed=False, reason="score 0.95"))
     assert d.action == Action.BLOCK
     assert d.output is None
+
+
+def test_groundedness_fail_blocks_when_budget_exhausted():
+    d = engine.decide(
+        AggregatedResults(results=[_r("schema"), _r("groundedness", passed=False, reason="hallucinated claim")]),
+        candidate="original",
+        retries_left=0,
+    )
+    assert d.action == Action.BLOCK
+    assert "cannot verify against source" in d.reason
+
+
+def test_groundedness_fail_reasks_when_retries_available():
+    d = engine.decide(
+        AggregatedResults(results=[_r("schema"), _r("groundedness", passed=False, reason="hallucinated claim")]),
+        candidate="original",
+        retries_left=1,
+    )
+    assert d.action == Action.REASK
+    assert "groundedness check failed" in d.reason
+
+
+def test_toxicity_beats_groundedness_fail():
+    # Toxicity BLOCK takes precedence over groundedness REASK
+    d = engine.decide(
+        AggregatedResults(results=[
+            _r("schema"),
+            _r("toxicity", passed=False, reason="threat"),
+            _r("groundedness", passed=False, reason="unsupported"),
+        ]),
+        candidate="original",
+        retries_left=2,
+    )
+    assert d.action == Action.BLOCK
+    assert "toxic content detected" in d.reason

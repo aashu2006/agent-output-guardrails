@@ -4,12 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 
 from guardrails.aggregator import AggregatedResults
+from guardrails.checks.groundedness import GroundednessChecker
 from guardrails.checks.pii import PIIScanner
 from guardrails.checks.schema import SchemaValidator
 from guardrails.checks.toxicity import ToxicityScanner
 from guardrails.config import PolicyConfig
 from guardrails.policy import Decision, PolicyEngine
-
 
 
 class GuardrailEngine:
@@ -21,6 +21,7 @@ class GuardrailEngine:
         schema: type[BaseModel],
         config: PolicyConfig | None = None,
         toxicity_scanner: ToxicityScanner | None = None,
+        groundedness_checker: GroundednessChecker | None = None,
     ):
         self.config = config or PolicyConfig()
         self.schema_check = SchemaValidator(schema)
@@ -28,9 +29,18 @@ class GuardrailEngine:
         self.toxicity_check = toxicity_scanner or ToxicityScanner(
             threshold=self.config.toxicity_threshold
         )
+        self.groundedness_check = groundedness_checker or GroundednessChecker(
+            t_low=self.config.groundedness_t_low,
+            t_ground=self.config.groundedness_threshold,
+        )
         self.policy = PolicyEngine()
 
-    def validate(self, candidate: str) -> Decision:
+    def validate(
+        self,
+        candidate: str,
+        context: dict | None = None,
+        source: str | None = None,
+    ) -> Decision:
         timings: dict[str, float] = {}
         t0 = time.perf_counter()
 
@@ -43,13 +53,20 @@ class GuardrailEngine:
         # stage 2: remaining checks in parallel on the same immutable candidate
         if schema_result.passed:
             parallel_checks = []
+            parsed_data = schema_result.metadata.get("parsed")
+
             if "pii" in self.config.enabled:
                 parallel_checks.append(
-                    (self.pii_check, {"parsed": schema_result.metadata.get("parsed")})
+                    (self.pii_check, {"parsed": parsed_data})
                 )
             if "toxicity" in self.config.enabled:
                 parallel_checks.append(
-                    (self.toxicity_check, {"parsed": schema_result.metadata.get("parsed")})
+                    (self.toxicity_check, {"parsed": parsed_data})
+                )
+            if "groundedness" in self.config.enabled:
+                src = source or (context or {}).get("source")
+                parallel_checks.append(
+                    (self.groundedness_check, {"source": src, "parsed": parsed_data})
                 )
 
             if parallel_checks:

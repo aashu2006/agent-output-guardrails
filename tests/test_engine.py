@@ -50,3 +50,42 @@ def test_engine_skips_toxicity_when_not_in_enabled():
 
     # Must pass without crashing because toxicity was skipped!
     assert decision.action == Action.ALLOW
+
+
+def test_engine_runs_groundedness_in_parallel():
+    from guardrails.checks.groundedness import GroundednessChecker
+
+    mock_embed = lambda q, d: [0.85]
+    mock_nli = lambda p, h: 0.95  # fully grounded
+    grounded_checker = GroundednessChecker(embedder=mock_embed, nli_classifier=mock_nli)
+
+    config = PolicyConfig(enabled=["schema", "pii", "groundedness"])
+    engine = GuardrailEngine(UserProfile, config=config, groundedness_checker=grounded_checker)
+
+    candidate = '{"username": "user1", "bio": "Paris is the capital of France."}'
+    source = "France has Paris as its capital city."
+
+    decision = engine.validate(candidate, source=source)
+
+    assert decision.action == Action.ALLOW
+    assert "parallel" in decision.timings
+    assert decision.output == candidate
+
+
+def test_engine_blocks_ungrounded_output():
+    from guardrails.checks.groundedness import GroundednessChecker
+
+    mock_embed = lambda q, d: [0.10]  # below t_low -> ungrounded
+    grounded_checker = GroundednessChecker(embedder=mock_embed)
+
+    config = PolicyConfig(enabled=["schema", "groundedness"])
+    engine = GuardrailEngine(UserProfile, config=config, groundedness_checker=grounded_checker)
+
+    candidate = '{"username": "user1", "bio": "Aliens landed in Times Square yesterday."}'
+    source = "Stock market updates for tech companies."
+
+    decision = engine.validate(candidate, source=source)
+
+    assert decision.action == Action.BLOCK
+    assert "cannot verify against source" in decision.reason
+    assert decision.output is None

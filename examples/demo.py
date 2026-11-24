@@ -188,4 +188,31 @@ if model_loaded:
     d5 = engine_v2.validate(polite_input)
     print_card("3.2", "POLITE AGENT RESPONSE (expect ALLOW)", polite_input, d5)
 
-    print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")
+# ===========================================================================
+# 4. PHASE 2: GROUNDEDNESS & HALLUCINATION GATE (RAG Verification)
+# ===========================================================================
+print_section_header(
+    "4. PHASE 2: GROUNDEDNESS GATE (RAG Hallucination Detection)",
+    "Sentence Splitting -> Cosine Rejection (<T_low) -> NLI Verification",
+)
+
+rag_source = (
+    "Acme Corp was founded in 2012 by Sarah Jenkins. "
+    "The total invoice balance of $4,999 is due by December 31, 2026."
+)
+
+grounded_response = '{"customer": "Acme Corp was founded by Sarah Jenkins.", "amount": 4999, "paid": false}'
+hallucinated_response = '{"customer": "Acme Corp was acquired by Google for 10 Billion dollars", "amount": 4999, "paid": false}'
+
+engine_v3 = GuardrailEngine(
+    Invoice,
+    config=PolicyConfig(enabled=["schema", "pii", "groundedness"]),
+)
+
+d6 = engine_v3.validate(grounded_response, source=rag_source)
+print_card("4.1", "GROUNDED RAG RESPONSE (expect ALLOW)", grounded_response, d6)
+
+d7 = engine_v3.validate(hallucinated_response, source=rag_source)
+print_card("4.2", "HALLUCINATED RESPONSE (expect BLOCK)", hallucinated_response, d7)
+
+print(f"{BOLD}{GREEN}✔ All pipeline checks executed successfully!{RESET}\n")
