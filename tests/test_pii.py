@@ -48,6 +48,13 @@ def test_clean_text_untouched():
     assert text == "totally normal sentence, amount 500"
 
 
+def test_at_domain_not_false_positive_email():
+    """English phrases like 'look at amazon.com' must NOT be classified as email."""
+    text, counts = _redact_text("I will look at amazon.com tomorrow")
+    assert counts.get("email", 0) == 0
+    assert text == "I will look at amazon.com tomorrow"
+
+
 def test_parsed_redaction_keeps_json_valid():
     import json
     r = pii.check("", context={"parsed": {"customer": "mail: a@b.com", "amount": 5}})

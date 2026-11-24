@@ -1,5 +1,12 @@
+import re
 from typing import Any
 from guardrails.providers import LLMProvider
+
+
+def _sanitize_untrusted_prompt_text(text: str) -> str:
+    """Neutralizes spoofed delimiter headers in untrusted model outputs to prevent prompt injection."""
+    sanitized = text.strip()
+    return re.sub(r"\[([A-Z_ ]+)\]", r"(\1)", sanitized)
 
 
 class ReaskEngine:
@@ -23,23 +30,26 @@ class ReaskEngine:
         previous_candidate: str | None = None,
     ) -> str:
         """Constructs an unambiguous repair prompt with original context and actionable feedback."""
+        safe_feedback = _sanitize_untrusted_prompt_text(feedback)
         parts = [
             original_prompt.strip(),
             "\n[VALIDATION FEEDBACK]",
-            f"Your previous response failed validation:\n{feedback.strip()}",
+            f"Your previous response failed validation:\n{safe_feedback}",
         ]
         if previous_candidate and str(previous_candidate).strip():
+            safe_candidate = _sanitize_untrusted_prompt_text(str(previous_candidate))
             parts.extend([
                 "\n[PREVIOUS RESPONSE]",
-                str(previous_candidate).strip(),
+                safe_candidate,
             ])
         parts.append(
             "Please return a corrected response strictly adhering to the required schema and constraints."
         )
         if source and str(source).strip():
+            safe_source = str(source).strip()
             parts.extend([
                 "\n[REFERENCE CONTEXT]",
-                str(source).strip(),
+                safe_source,
                 "Ensure your entire response is strictly grounded in this reference context.",
             ])
         return "\n".join(parts)

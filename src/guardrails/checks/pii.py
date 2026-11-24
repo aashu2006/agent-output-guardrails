@@ -3,13 +3,26 @@ import json
 from guardrails.base import Guardrail
 from guardrails.results import GuardrailResult
 
+INVISIBLE_CHARS_REGEX = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad]")
+
 # order = priority: overlap hone pe upar wala jeet ta hai
 PATTERNS = {
     "card": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
     "aadhaar": re.compile(r"\b\d{4}[ -]?\d{4}[ -]?\d{4}\b"),
-    "phone": re.compile(r"(?<!\d)(?:\+91[ -]?)?(?:0)?\d{10}\b"),
-    "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
-    "pan": re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b"),
+    "phone": re.compile(
+        r"(?<!\d)(?<!\d[ .-])(?:\+91[ .-]?)?(?:0)?(?:"
+        r"\(\d{3}\)[ .-]?\d{3}[ .-]?\d{4}|"
+        r"(?:\d[ .-]??){9}\d"
+        r")(?![ .-]??\d)"
+    ),
+    "email": re.compile(
+        r"(?:"
+        r"[\w.+-]+(?:@|\s*(?:\[at\]|\(at\))\s*)[\w-]+(?:(?:\.|\s*(?:\[dot\]|\(dot\))\s*)[\w-]+)+|"
+        r"[\w.+-]+\s+\bat\b\s+[\w-]+(?:\s+\bdot\b\s+[\w-]+)+"
+        r")",
+        re.IGNORECASE,
+    ),
+    "pan": re.compile(r"\b[A-Za-z]{5}\d{4}[A-Za-z]\b"),
     "ip": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
 
@@ -36,7 +49,8 @@ def _luhn_valid(digits: str) -> bool:
     return total % 10 == 0
 
 def _redact_text(text: str) -> tuple[str, dict[str, int]]:
-    """Returns (sanitized_text, counts). Span collect -> overlap drop by priority -> right-to-left replace."""
+    """Returns (sanitized_text, counts). Normalizes invisible chars -> Span collect -> overlap drop -> replace."""
+    text = INVISIBLE_CHARS_REGEX.sub("", text)
     spans = []  # (start, end, category)
     for category, pattern in PATTERNS.items():
         for m in pattern.finditer(text):
@@ -61,14 +75,22 @@ def _redact_text(text: str) -> tuple[str, dict[str, int]]:
     return text, counts
 
 def _walk_and_redact(obj, counts):
-    """Parsed dict/list mein recursively ghus ke har string field saaf karo."""
+    """Parsed dict/list mein recursively ghus ke har string field (keys + values) saaf karo."""
     if isinstance(obj, str):
         clean, c = _redact_text(obj)
         for k, v in c.items():
             counts[k] = counts.get(k, 0) + v
         return clean
     if isinstance(obj, dict):
-        return {k: _walk_and_redact(v, counts) for k, v in obj.items()}
+        cleaned = {}
+        for k, v in obj.items():
+            clean_k = k
+            if isinstance(k, str):
+                clean_k, c_k = _redact_text(k)
+                for cat, count in c_k.items():
+                    counts[cat] = counts.get(cat, 0) + count
+            cleaned[clean_k] = _walk_and_redact(v, counts)
+        return cleaned
     if isinstance(obj, list):
         return [_walk_and_redact(item, counts) for item in obj]
     return obj  # numbers, bools, None as-is
